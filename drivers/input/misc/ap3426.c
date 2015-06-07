@@ -78,6 +78,11 @@
 #define LDBG(s,args...) {}
 #endif
 
+#define DI_AUTO_CAL
+#ifdef DI_AUTO_CAL
+       #define DI_PS_CAL_THR 500
+#endif
+
 static void pl_timer_callback(unsigned long pl_data);
 static int ap3426_power_ctl(struct ap3426_data *data, bool on);
 static int ap3426_power_init(struct ap3426_data*data, bool on);
@@ -92,16 +97,18 @@ static u8 ap3426_reg_to_idx_array[AP3426_MAX_REG_NUM] = {
 	15,	16,	17,	18,	19,	20,	21,	0xff,
 	22,	23,	24,	25,	26,	27         //20-2f
 };
+#ifdef LSC_DBG
 static u8 ap3426_reg[AP3426_NUM_CACHABLE_REGS] = {
 	0x00,0x01,0x02,0x06,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,
 	0x10,0x1A,0x1B,0x1C,0x1D,0x20,0x21,0x22,0x23,0x24,
 	0x25,0x26,0x28,0x29,0x2A,0x2B,0x2C,0x2D
 };
+static u8 *reg_array = ap3426_reg;
+#endif
 // AP3426 range
 static int ap3426_range[4] = {32768,8192,2048,512};
 //static u16 ap3426_threshole[8] = {28,444,625,888,1778,3555,7222,0xffff};
 
-static u8 *reg_array = ap3426_reg;
 static int *range = ap3426_range;
 
 static int cali = 320;
@@ -411,6 +418,7 @@ static int ap3426_get_px_value(struct i2c_client *client)
 static int ap3426_ps_enable(struct ap3426_data *ps_data,int enable)
 {
     int32_t ret;
+	printk("!!!!!!%s!!!!!!enable=%d\n",__func__,enable);
     if(misc_ps_opened == enable)
                 return 0;
     misc_ps_opened = enable;
@@ -419,7 +427,7 @@ static int ap3426_ps_enable(struct ap3426_data *ps_data,int enable)
     if(ret < 0){
 	printk("ps enable error!!!!!!\n");
     }
-
+     msleep(50);
 	if(enable){
 		enable_irq(ps_data->client->irq);
 		wake_lock(&ps_data->ps_wake_lock);
@@ -452,7 +460,7 @@ static int ap3426_ls_enable(struct ap3426_data *ps_data,int enable)
     if(ret < 0){
         printk("ls enable error!!!!!!\n");
     } 
-
+     msleep(50);
 	if(enable)
 		enable_irq(ps_data->client->irq);
 	else
@@ -737,6 +745,62 @@ static int ap3426_als_poll_delay_set(struct sensors_classdev *sensors_cdev,
    return 0; 
 } 
 
+#ifdef DI_AUTO_CAL
+u8 Calibration_Flag = 0;
+
+static int AP3xx6_set_pcrosstalk(struct i2c_client *client, int val)
+{
+    int lsb, msb, err;
+
+	msb = val >> 8;
+	lsb = val & 0xFF;
+    err = __ap3426_write_reg(client, 0x28,
+            0xFF, 0x00, lsb);
+	     
+    err =__ap3426_write_reg(client, 0x29,
+            0xFF, 0x00, msb);
+          
+	return err;
+}
+
+int AP3xx6_Calibration(struct i2c_client *client)
+{
+      // int err;
+	int i = 0;
+	u16 ps_data = 0;
+       u16 data = 0;
+	if(Calibration_Flag == 0)
+	{
+		for(i=0; i<4; i++)
+		{
+			data = ap3426_get_px_value(client);
+
+			printk("AP3426 ps =%d \n",data);
+			if((data) > DI_PS_CAL_THR)
+			{
+				Calibration_Flag = 0;
+				goto err_out;
+			}
+			else
+			{
+				ps_data += data;
+			}
+			msleep(100);
+		}
+		Calibration_Flag =1;
+		printk("AP3426 ps_data1 =%d \n",ps_data);
+		ps_data = ps_data/4;
+		printk("AP3426 ps_data2 =%d \n",ps_data);
+		AP3xx6_set_pcrosstalk(client,ps_data); 
+	}
+	return 1;
+err_out:
+	printk("AP3xx6_read_ps fail\n");
+	return -1;	
+}
+#endif 
+
+
 static int ap3426_ps_enable_set(struct sensors_classdev *sensors_cdev,
 					   unsigned int enabled) 
 { 
@@ -746,6 +810,12 @@ static int ap3426_ps_enable_set(struct sensors_classdev *sensors_cdev,
 
    err = ap3426_ps_enable(ps_data,enabled);
 
+	#ifdef DI_AUTO_CAL
+	if(enabled ==1)
+	{
+        AP3xx6_Calibration(ps_data->client);
+	}
+	#endif
 
    if (err < 0) 
 	   return err; 
@@ -1236,8 +1306,8 @@ static const struct attribute_group ap3426_attr_group = {
 
 static int ap3426_init_client(struct i2c_client *client)
 {
-    struct ap3426_data *data = i2c_get_clientdata(client);
-    int i;
+   // struct ap3426_data *data = i2c_get_clientdata(client);
+    //int i;
 
     i2c_smbus_write_byte_data(client, 0x02, 0x80);
 
@@ -1249,14 +1319,14 @@ static int ap3426_init_client(struct i2c_client *client)
 
     i2c_smbus_write_byte_data(client, 0x1C, 0xFF);
     i2c_smbus_write_byte_data(client, 0x1D, 0XFF);
-		/*psensor high low thread*/
-	//low
-    i2c_smbus_write_byte_data(client, 0x2A, 0x50);
+    /*psensor high low thread*/
+    //low
+    i2c_smbus_write_byte_data(client, 0x2A, 0xa0);
     i2c_smbus_write_byte_data(client, 0x2B, 0x00);
-	//hight
-    i2c_smbus_write_byte_data(client, 0x2C, 0xA0);
-    i2c_smbus_write_byte_data(client, 0x2D, 0x00);
-
+    //hight
+    i2c_smbus_write_byte_data(client, 0x2C, 0x30);
+    i2c_smbus_write_byte_data(client, 0x2D, 0x01);
+#if 0
     /* read all the registers once to fill the cache.
      * if one of the reads fails, we consider the init failed */
     for (i = 0; i < AP3426_NUM_CACHABLE_REGS; i++) {
@@ -1265,6 +1335,7 @@ static int ap3426_init_client(struct i2c_client *client)
 	    return -ENODEV;
 	data->reg_cache[i] = v;
     }
+#endif	
     /* set defaults */
     ap3426_set_range(client, AP3426_ALS_RANGE_0);
     ap3426_set_mode(client, AP3426_SYS_DEV_DOWN);
@@ -1556,6 +1627,18 @@ static int ap3426_probe(struct i2c_client *client,
 	goto err_power_on;                     //end
 	
     dev_info(&client->dev, "Driver version %s enabled\n", DRIVER_VERSION);
+
+	#ifdef DI_AUTO_CAL
+	 __ap3426_write_reg(data->client,
+        AP3426_REG_SYS_CONF, AP3426_REG_SYS_INT_PMASK, 1, 1);
+	 
+	msleep(100);	
+       AP3xx6_Calibration(data->client);
+	   
+	 __ap3426_write_reg(data->client,
+        AP3426_REG_SYS_CONF, AP3426_REG_SYS_INT_PMASK, 1, 0);
+	#endif   
+   
     return 0;
 err_create_wq_failed:
     if(&data->pl_timer != NULL)
